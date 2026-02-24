@@ -19,41 +19,31 @@ args = args_config.get_args()
 
 
 
+
+# Quantized VGG9 SNN model (see MINT paper, Section 4)
+# This model stacks quantized convolutional layers and LIF neurons
 class Q_ShareScale_VGG9(nn.Module):
     def __init__(self,time_step,dataset):
         super(Q_ShareScale_VGG9, self).__init__()
-
-        #### Set bitwidth for quantization
+        # Set bitwidth for quantization (see Table 1 in paper)
         self.num_bits_w = 2
         self.num_bits_u = 2
-  
-        #### Print out the parameters for quantization
-        
         print("quant bw for w: " + str(self.num_bits_w))
         print("quant bw for u: " + str(self.num_bits_u))
-
-        #### Other parameters for SNNs
+        # SNN parameters
         self.time_step = time_step
-
         input_dim = 3
-
-        # print(args.th)
-
-
+        # First layer: regular Conv2d + LIF (no quantization on input)
         self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=3, padding=1, bias=False)
         self.direct_lif = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=False)
-        # self.ConvBnLif1 = QConvBN2dLIF(conv1,bn1,self.num_bits_w,self.num_bits_b,self.num_bits_u)
-
+        # Quantized Conv2d + LIF layers (see Section 3)
         conv2 = nn.Conv2d(64,64, kernel_size=3, padding=1, bias=False)
         lif2 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif2 = QConv2dLIF(conv2,lif2,self.num_bits_w,self.num_bits_u)
-
         self.pool1 = nn.MaxPool2d(kernel_size=2)
-
         conv3 = nn.Conv2d(64,128, kernel_size=3, padding=1, bias=False)
         lif3 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif3 = QConv2dLIF(conv3,lif3,self.num_bits_w,self.num_bits_u)
-
         conv4 = nn.Conv2d(128,128, kernel_size=3, padding=1, bias=False)
         lif4 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif4 = QConv2dLIF(conv4,lif4,self.num_bits_w,self.num_bits_u)
@@ -99,35 +89,28 @@ class Q_ShareScale_VGG9(nn.Module):
                 nn.init.kaiming_uniform_(m.weight)
 
 
+
     def forward(self, inp):
-        
+        # Forward pass for SNN with time steps (see Section 4)
         u_out = []
         self.reset_dynamics()
         static_input = self.conv1(inp)
-
         for t in range(self.time_step):
+            # First LIF layer (no quantization)
             s = self.direct_lif.direct_forward(static_input,False,0)
-
+            # Quantized Conv2d + LIF layers
             s = self.ConvLif2(s)
-            # print(torch.sum(s))
             s = self.pool1(s)
-
             s = self.ConvLif3(s)
             s = self.ConvLif4(s)
-
             s = self.pool2(s)
-
             s = self.ConvLif5(s)
             s = self.ConvLif6(s)
             s = self.ConvLif7(s)
-
             s = self.pool3(s)
-
             s = s.view(s.shape[0],-1)
             s = self.fc_out(s)
-
             u_out += [s]
-    
         return u_out
 
 

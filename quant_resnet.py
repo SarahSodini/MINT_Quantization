@@ -25,40 +25,39 @@ from spikingjelly.clock_driven import functional, layer, surrogate, neuron
 
 # tau_global = 1./(1. - 0.5)
 
+
+# Quantized BasicBlock for ResNet SNN (see MINT paper, Section 4)
 class BasicBlock(nn.Module):
-
     expansion = 1
-
     def __init__(self, in_planes, planes, n_w, n_u, n_b, stride=1):
         super(BasicBlock, self).__init__()
-
-        
+        # Quantization bitwidths
         self.num_bits_w = n_w
         self.num_bits_b = n_b
         self.num_bits_u = n_u
-
+        # First quantized Conv-BN-LIF block
         conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         bn1 = nn.BatchNorm2d(planes)
         lif1 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvBnLif1 = QConvBN2dLIF(conv1,bn1,lif1,self.num_bits_w,self.num_bits_b,self.num_bits_u)
-
+        # Second quantized Conv-BN block
         conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         bn2 = nn.BatchNorm2d(planes)
         self.ConvBn2 = QConvBN2d(conv2,bn2,self.num_bits_w,self.num_bits_u)
-
-
+        # LIF neuron after residual
         self.lif2 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
-
+        # Shortcut connection (identity or 1x1 conv)
         self.shortcut = nn.Sequential()
         conv_sh = nn.Conv2d(in_planes, self.expansion*planes, kernel_size=1, stride=stride, bias=False)
         bn_sh = nn.BatchNorm2d(self.expansion*planes)
-        # self.ConvBn_sh = QConvBN2d(conv_sh,bn_sh,self.num_bits_w,self.num_bits_u)
+        
         if stride != 1 or in_planes != self.expansion*planes:
             self.shortcut = nn.Sequential(
                 QConvBN2d(conv_sh,bn_sh,self.num_bits_w,self.num_bits_u,short_cut=True)
             )
 
     def forward(self, x):
+        # Forward through quantized Conv-BN-LIF, then Conv-BN, add shortcut, then LIF
         out = self.ConvBnLif1(x)
         out = self.ConvBn2(out)
         out += self.shortcut(x)

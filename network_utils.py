@@ -21,31 +21,25 @@ args = args_config.get_args()
 
 
 
-class QFConvBN2dLIF(nn.Module):
-    """ folding the conv2d and batchnorm2d in the inference"""
 
+# Quantized Conv-BN-LIF block (see MINT paper, Section 3)
+# This module folds BatchNorm into Conv2d for inference, then applies quantization and LIF neuron
+class QFConvBN2dLIF(nn.Module):
+    """Folds Conv2d and BatchNorm2d for inference, applies quantization, then LIF neuron."""
     def __init__(self, conv_module, bn_module, lif_module, num_bits_w=4, num_bits_bias=4, num_bits_u=4):
         super(QFConvBN2dLIF,self).__init__()
-
         self.conv_module = conv_module
         self.bn_module = bn_module
         self.lif_module = lif_module
-
         self.num_bits_w = num_bits_w
         self.num_bits_bias = num_bits_bias
         self.num_bits_u = num_bits_u
-        
-        # initial_w = conv_module.weight.data.abs().max()
+        # Initialize quantization scaling parameter beta (see Eq. 3)
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
-        # print(initial_w)
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
-        # nn.ParameterList([nn.Parameter(initial_w) for i in range(1)]).cuda()
-        # print(self.scaling[0])
-        # self.scaling = nn.Parameter(,requires_grad=True).cuda()
-        # print(self.scaling)
-        # self.scaling.requires_grad_(requires_grad=True)
-    
+
     def fold_bn(self, mean, std):
+        # Fold BatchNorm into Conv weights and bias for inference
         if self.bn_module.affine:
             gamma_ = self.bn_module.weight / std   
             weight = self.conv_module.weight * gamma_.reshape(self.conv_module.out_channels, 1, 1, 1)
@@ -62,37 +56,32 @@ class QFConvBN2dLIF(nn.Module):
                 bias = gamma_ * self.conv_module.bias - gamma_ * mean
             else:
                 bias = -gamma_ * mean
-                # bias = 0*mean
-            
         return weight, bias
 
 
     def forward(self, x):
+        # During training, update BN stats; during inference, use running stats
         if self.training:  
-            ### Get the bn stats first, doing conv first
+            # Compute mean/var for BN from current batch
             y = F.conv2d(x, self.conv_module.weight, self.conv_module.bias, 
                             stride=self.conv_module.stride,
                             padding=self.conv_module.padding,
                             dilation=self.conv_module.dilation,
                             groups=self.conv_module.groups)
-
             y = y.permute(1, 0, 2, 3) # NCHW -> CNHW
             y = y.reshape(self.conv_module.out_channels, -1) # CNHW -> (C,NHW)
             mean = y.mean(1)
             var = y.var(1)
-
             self.bn_module.running_mean = \
                 self.bn_module.momentum * self.bn_module.running_mean + \
                 (1 - self.bn_module.momentum) * mean
             self.bn_module.running_var = \
                 self.bn_module.momentum * self.bn_module.running_var + \
                 (1 - self.bn_module.momentum) * var
-
         else:
-            #### Using long term mean and var during inference
+            # Use running mean/var for inference
             mean = self.bn_module.running_mean
             var = self.bn_module.running_var
-
         std = torch.sqrt(var + self.bn_module.eps)
         weight, bias = self.fold_bn(mean, std)
 
@@ -112,7 +101,6 @@ class QFConvBN2dLIF(nn.Module):
                 qweight = b_q(weight, self.num_bits_w)
         else:
             qweight = weight
-
         if args.bq:
             if args.share:
                 qbias,beta = w_q(bias, self.num_bits_bias, beta)
@@ -120,18 +108,17 @@ class QFConvBN2dLIF(nn.Module):
                 qbias = b_q(bias, self.num_bits_bias)
         else:
             qbias = bias
-
+        # Apply quantized Conv2d
         x = F.conv2d(x, qweight,qbias,
                         stride=self.conv_module.stride,
                         padding=self.conv_module.padding,
                         dilation=self.conv_module.dilation,
                         groups=self.conv_module.groups)
-
+        # Pass through LIF neuron
         if args.share:
             s = self.lif_module(x, args.share, beta)
         else:
             s = self.lif_module(x, args.share, 0)
-
         return s
 
 

@@ -4,10 +4,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
+
+# Surrogate gradient function for spiking neurons (see Eq. 7 in the MINT paper)
+# Implements a custom autograd function for the firing event with a surrogate gradient in backward
 class Firing(torch.autograd.Function):
-    
     @staticmethod
     def forward(ctx, inp):
+        # Forward: binary spike if input > 0
         out = ((inp)>0).float()
         ctx.save_for_backward(inp)
 
@@ -15,55 +18,54 @@ class Firing(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        # Backward: surrogate gradient for non-differentiable spike
         input, = ctx.saved_tensors
         grad_input = grad_output.clone()
-        # grad = grad_input * 0.3 * F.threshold(1.0 - torch.abs((input-ctx.th)/ctx.th), 0, 0)
-        # grad = grad_input*0.3*torch.where(torch.abs(input-ctx.th)<1.25, 1, 0)
+        # The surrogate gradient is nonzero in a window around threshold (here, 0.5)
         grad = grad_input*torch.where(torch.abs(input-0.5)<1, 1, 0)
         return grad, None, None
 
 
+
+# Implements the LIF neuron firing condition (see Eq. 2 in the MINT paper)
+# H: membrane potential, th: threshold, beta: scaling factor
 def lif_forward(H, th, beta):
     out = torch.zeros_like(H).cuda()
     out[H >= torch.ceil(th/beta)] = 1
     return out
 
-### Sharing alpha
+
+# Quantization functions for weights, membrane potential, and bias
+# These implement the quantization formulas (see Eq. 3 and 4 in the MINT paper)
+# w_q: quantize weights with shared scaling alpha
 def w_q(w, b, alpha):
-    w = torch.tanh(w)
-    # alpha = w.data.abs().max()
-    # print(alpha)
+    w = torch.tanh(w)  # restrict to [-1, 1]
     w = torch.clamp(w/alpha,min=-1,max=1)
-    w = w*(2**(b-1)-1)
-    w_hat = (w.round()-w).detach()+w
-    # print(torch.unique(w_hat))
+    w = w*(2**(b-1)-1)  # scale to quantization levels
+    w_hat = (w.round()-w).detach()+w  # STE: straight-through estimator
     return w_hat*alpha/(2**(b-1)-1), alpha
 
+# u_q: quantize membrane potential with shared scaling alpha
 def u_q(u, b, alpha):
     u = torch.tanh(u)
-    # alpha = w.data.abs().max()
-    # print(alpha)
     u = torch.clamp(u/alpha,min=-1,max=1)
     u = u*(2**(b-1)-1)
     u_hat = (u.round()-u).detach()+u
-    # print(torch.unique(w_hat))
     return u_hat*alpha/(2**(b-1)-1)
 
-### Not sharing alpha
+# b_q: quantize with per-tensor scaling (not shared)
 def b_q(w, b):
     w = torch.tanh(w)
     alpha = w.data.abs().max()
-    # print(alpha)
     w = torch.clamp(w/alpha,min=-1,max=1)
     w = w*(2**(b-1)-1)
     w_hat = (w.round()-w).detach()+w
-    # print(torch.unique(w_hat))
     return w_hat*alpha/(2**(b-1)-1)
 
+
+# Inference-time quantization (no STE)
 def w_q_inference(w, b, alpha):
     w = torch.tanh(w)
-    # alpha = w.data.abs().max()
-    # print(alpha)
     w = torch.clamp(w/alpha,min=-1,max=1)
     w = w*(2**(b-1)-1)
     w_hat = w.round()
@@ -72,7 +74,6 @@ def w_q_inference(w, b, alpha):
 def b_q_inference(w, b):
     w = torch.tanh(w)
     alpha = w.data.abs().max()
-    # print(alpha)
     w = torch.clamp(w/alpha,min=-1,max=1)
     w = w*(2**(b-1)-1)
     w_hat = w.round()
