@@ -181,25 +181,38 @@ class ResNet(nn.Module):
         return u_out
 
 
+def ResNet19(num_classes, total_timestep):
+def ResNet34():
+def ResNet50():
+def ResNet101():
+def ResNet152():
+def test():
+
+# Factory function for ResNet18 SNN
 def resnet18():
     return ResNet(BasicBlock, [2,2,2,2])
 
+# Factory function for custom ResNet19 SNN
 def ResNet19(num_classes, total_timestep):
     return ResNet(BasicBlock, [3,3,2], num_classes, total_timestep)
 
+# Factory function for ResNet34 SNN
 def ResNet34():
     return ResNet(BasicBlock, [3,4,6,3])
 
+# Factory function for ResNet50 SNN (uses Bottleneck blocks)
 def ResNet50():
     return ResNet(Bottleneck, [3,4,6,3])
 
+# Factory function for ResNet101 SNN (uses Bottleneck blocks)
 def ResNet101():
     return ResNet(Bottleneck, [3,4,23,3])
 
+# Factory function for ResNet152 SNN (uses Bottleneck blocks)
 def ResNet152():
     return ResNet(Bottleneck, [3,8,36,3])
 
-
+# Simple test function to check ResNet output shape
 def test():
     net = ResNet18()
     y = net(torch.randn(1,3,32,32))

@@ -58,16 +58,18 @@ class LIFSpike(nn.Module):
         # Implements LIF update and spike generation (see Eq. 1 and 2)
         # s: input current, share: use shared quantization, beta: scaling, bias: bias term
         # Compute new membrane potential
+        # Forward pass for LIF neuron with quantization and surrogate gradient
+        # s: input current, share: use shared quantization, beta: scaling, bias: bias term
         H = s + self.membrane_potential
-        # Surrogate gradient for spike generation (Eq. 7)
+        # Surrogate gradient for spike generation (Eq. 7 in MINT paper)
         grad = ((1.0 - torch.abs(H-self.thresh)).clamp(min=0))
         s = (((H-self.thresh) > 0).float() - H*grad).detach() + H*grad.detach()
-        # Update membrane potential with soft or hard reset (Eq. 2)
+        # Update membrane potential with soft or hard reset (Eq. 2 in MINT paper)
         if self.soft_reset:
             U = (H - s*self.thresh)*self.leak
         else:
             U = H*self.leak*(1-s)
-        # Optional quantization of membrane potential (Eq. 4)
+        # Optional quantization of membrane potential (Eq. 4 in MINT paper)
         if self.quant_u:
             if share:
                 self.membrane_potential = u_q(U,self.num_bits_u,beta)
@@ -78,14 +80,18 @@ class LIFSpike(nn.Module):
         return s
     
     def direct_forward(self, s, share, beta):
-        # Direct forward for static input (no bias)
+        # Direct forward for static input (no bias), used for first layer
+        # s: input current, share: use shared quantization, beta: scaling
         H = s + self.membrane_potential
+        # Surrogate gradient for spike generation (Eq. 7 in MINT paper)
         grad = ((1.0 - torch.abs(H-self.thresh)).clamp(min=0))
         s = (((H-self.thresh) > 0).float() - H*grad).detach() + H*grad.detach()
+        # Update membrane potential with soft or hard reset (Eq. 2 in MINT paper)
         if self.soft_reset:
             U = (H - s*self.thresh)*self.leak
         else:
             U = H*self.leak*(1-s)
+        # Optional quantization of membrane potential (Eq. 4 in MINT paper)
         if self.quant_u:
             if share:
                 self.membrane_potential = u_q(U,self.num_bits_u,beta)

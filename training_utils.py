@@ -195,14 +195,12 @@ def test_spa(model, test_loader, criterion):
 
 
 
+
+# Plot the distribution of membrane potentials (u) for a given layer and timestep
+# Used for analyzing quantization effects and neuron dynamics
 def get_u_distribution(data,l,t,color):
-    
-    # print("dist tensor", hist)
     bins = 128
-    # hist = torch.histc(data,bins).cpu()
-    # i_max = ((torch.max(data).cpu()).item())
     i_max = 10
-    # i_min = ((torch.min(data).cpu()).item())
     i_min = -10
     step = (i_max-i_min)/(bins)
     x = np.arange(i_min,i_max,step)
@@ -233,21 +231,24 @@ def get_u_distribution(data,l,t,color):
 #         print(f'W are all zeros at layer:{layer_i} at epoch {e}')
 
 
+
+# Utility class for tracking running averages (e.g., loss, accuracy)
 class AverageMeter(object):
     """
     Computes and stores the average and current value
     """
-
     def __init__(self):
         self.reset()
 
     def reset(self):
+        # Reset all statistics
         self.val = 0
         self.avg = 0
         self.sum = 0
         self.count = 0
 
     def update(self, val, n=1):
+        # Update statistics with new value
         self.val = val
         self.sum += val * n
         self.count += n
