@@ -15,9 +15,6 @@ import tracemalloc
 import math
 import gc
 
-
-
-
 def main():
 
     torch.manual_seed(23)
@@ -29,6 +26,7 @@ def main():
     print("********** SNN simulation parameters **********")
     print(args)
 
+#Builds dataloader for specified datasets
     if args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -167,6 +165,8 @@ def main():
         # common_indices = train_indices.intersection(test_indices)
         # print(f"Common indices between train and test datasets: {common_indices}")
         # exit()
+        
+# Builds model and optimizer based on specified parameters
     criterion = nn.CrossEntropyLoss()
     if args.arch == 'vgg16':
         model = Q_ShareScale_VGG16(args.T,args.dataset).cuda()
@@ -190,7 +190,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max= args.epoch, eta_min= 0)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=args.epoch)
 
-
+#Training loop
     best_accuracy = 0
     # tracemalloc.start()
     for epoch_ in range(args.epoch):

@@ -1,0 +1,13 @@
+# Project dependencies for MINT_Quantization
+# Tested with PyTorch 1.13.0 on macOS/Linux
+
+# use the official package names on PyPI
+torch==1.13.0
+torchvision>=0.14.0
+numpy>=1.21.0
+spikingjelly
+tqdm>=4.60.0
+
+# optional extras (install if you use GPU/other features)
+# cupy
+# matplotlib

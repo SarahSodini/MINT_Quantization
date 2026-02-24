@@ -48,6 +48,7 @@ def u_q(u, b, alpha):
     u_hat = (u.round()-u).detach()+u
     # print(torch.unique(w_hat))
     return u_hat*alpha/(2**(b-1)-1)
+
 ### Not sharing alpha
 def b_q(w, b):
     w = torch.tanh(w)
