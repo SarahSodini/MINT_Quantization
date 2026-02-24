@@ -19,10 +19,12 @@ cudnn.deterministic = True
 
 args = args_config.get_args()
 
-# Quantized Conv-BN-LIF block (see MINT paper, Section 3)
-# This module folds BatchNorm into Conv2d for inference, then applies quantization and LIF neuron
+
+"""
+Fuses 3 operations: a convolution, batch normalization and a LIF spiking neuron into a single block with
+MINT quantization 
+"""
 class QFConvBN2dLIF(nn.Module):
-    """Folds Conv2d and BatchNorm2d for inference, applies quantization, then LIF neuron."""
     def __init__(self, conv_module, bn_module, lif_module, num_bits_w=4, num_bits_bias=4, num_bits_u=4):
         super(QFConvBN2dLIF,self).__init__()
         self.conv_module = conv_module
@@ -31,12 +33,16 @@ class QFConvBN2dLIF(nn.Module):
         self.num_bits_w = num_bits_w
         self.num_bits_bias = num_bits_bias
         self.num_bits_u = num_bits_u
-        # Initialize quantization scaling parameter beta (see Eq. 3)
+
+        # Initialize shared scaling factor beta (= alpha in MINT paper, Section IV-C)
+        # Formula: 2 * mean(|W|) / sqrt(2^(n-1) - 1):
+        # sets an initial quantization range proportional to the weight magnitude.
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
 
+
+# Fold BatchNorm into Conv weights and bias for inference
     def fold_bn(self, mean, std):
-        # Fold BatchNorm into Conv weights and bias for inference
         if self.bn_module.affine:
             gamma_ = self.bn_module.weight / std   
             weight = self.conv_module.weight * gamma_.reshape(self.conv_module.out_channels, 1, 1, 1)
@@ -57,7 +63,8 @@ class QFConvBN2dLIF(nn.Module):
 
 
     def forward(self, x):
-        # During training, update BN stats; during inference, use running stats
+        # During training, update BN stats
+        # during inference, use running stats
         if self.training:  
             # Compute mean/var for BN from current batch
             y = F.conv2d(x, self.conv_module.weight, self.conv_module.bias, 
@@ -65,7 +72,8 @@ class QFConvBN2dLIF(nn.Module):
                             padding=self.conv_module.padding,
                             dilation=self.conv_module.dilation,
                             groups=self.conv_module.groups)
-            y = y.permute(1, 0, 2, 3) # NCHW -> CNHW
+            
+            y = y.permute(1, 0, 2, 3) # NCHW -> CNHW (change tensor dimension order. N=batch size, C=channels, H=height, W=width)
             y = y.reshape(self.conv_module.out_channels, -1) # CNHW -> (C,NHW)
             mean = y.mean(1)
             var = y.var(1)
@@ -91,6 +99,8 @@ class QFConvBN2dLIF(nn.Module):
         #     self.scaling = nn.ParameterList([nn.Parameter(torch.tensor([alpha])) for i in range(1)]).cuda()
         # else:
         #     qweight = w_q(weight, self.num_bits_w, self.scaling[0])
+        
+        # Quantize weights and bias if enabled
         if args.wq:
             if args.share:
                 qweight,beta = w_q(weight, self.num_bits_w, self.beta[0])
@@ -105,13 +115,15 @@ class QFConvBN2dLIF(nn.Module):
                 qbias = b_q(bias, self.num_bits_bias)
         else:
             qbias = bias
+
         # Apply quantized Conv2d
         x = F.conv2d(x, qweight,qbias,
                         stride=self.conv_module.stride,
                         padding=self.conv_module.padding,
                         dilation=self.conv_module.dilation,
                         groups=self.conv_module.groups)
-        # Pass through LIF neuron
+        
+        # get spikes from lif neuron with or without shared scaling factor beta, depending on args.share
         if args.share:
             s = self.lif_module(x, args.share, beta)
         else:
@@ -119,9 +131,12 @@ class QFConvBN2dLIF(nn.Module):
         return s
 
 
+"""
+QConv2dLIF — Quantized Conv + LIF (no BatchNorm)
+Used for layers that don't have BN, e.g. the first layer.
+Simpler than QFConvBN2dLIF: no BN folding needed.
+"""
 class QConv2dLIF(nn.Module):
-    """ integerate the conv2d and LIF in the inference"""
-
     def __init__(self, conv_module, lif_module, num_bits_w=4, num_bits_u=4):
         super(QConv2dLIF,self).__init__()
 
@@ -131,21 +146,14 @@ class QConv2dLIF(nn.Module):
         self.num_bits_w = num_bits_w
         self.num_bits_u = num_bits_u
         
-        # initial_w = conv_module.weight.data.abs().max()
+        # Initialize shared scaling factor beta (= alpha in MINT paper, Section IV-C)
+        # Formula: 2 * mean(|W|) / sqrt(2^(n-1) - 1):
+        # sets an initial quantization range proportional to the weight magnitude.
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
-        # print(initial_w)
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
-        # nn.ParameterList([nn.Parameter(initial_w) for i in range(1)]).cuda()
-        # print(self.scaling[0])
-        # self.scaling = nn.Parameter(,requires_grad=True).cuda()
-        # print(self.scaling)
-        # self.scaling.requires_grad_(requires_grad=True)
-    
-
-
 
     def forward(self, x):
-        # if self.training:
+        # Quantize weights
         if args.wq:
             if args.share:
                 qweight,beta = w_q(self.conv_module.weight, self.num_bits_w, self.beta[0])
@@ -153,12 +161,14 @@ class QConv2dLIF(nn.Module):
                 qweight = b_q(self.conv_module.weight, self.num_bits_w)
         else:
             qweight = self.conv_module.weight
-        # qweight= w_q(self.weight, self.num_bits_weight, in_alpha)
+
+        # Convolution with (possibly quantized) weights; bias is NOT quantized here
         x = F.conv2d(x, qweight, self.conv_module.bias, stride=self.conv_module.stride,
                                         padding=self.conv_module.padding,
                                         dilation=self.conv_module.dilation,
                                         groups=self.conv_module.groups)
 
+        # get spikes from lif neuron with or without shared scaling factor beta, depending on args.share
         if args.share:
             s = self.lif_module(x, args.share, beta, bias=0)
         else:
@@ -182,13 +192,16 @@ class QConv2dLIF(nn.Module):
         #         s = self.lif_module(x, args.share, beta, bias=0)
         #     else:
         #         s = self.lif_module(x, args.share, 0, bias=0)
-
+        
+        #return spikes from LIF neuron
         return s
 
 
-
-# Quantized Conv-BN-LIF block for SNNs
-# Integrates quantized Conv2d, BatchNorm2d, and LIF neuron in one module
+"""
+QConvBN2dLIF — Quantized Conv + BN + LIF
+Like QConv2dLIF but with a BN applied AFTER the conv (not folded).
+Note: BN is applied at full precision here — no BN folding like in QFConvBN2dLIF.
+"""
 class QConvBN2dLIF(nn.Module):
     def __init__(self, conv_module, bn_module, lif_module, num_bits_w=4,num_bits_b=4, num_bits_u=4):
         super(QConvBN2dLIF,self).__init__()
@@ -201,12 +214,14 @@ class QConvBN2dLIF(nn.Module):
         self.num_bits_b = num_bits_b
         self.num_bits_u = num_bits_u
         
-        # Initialize quantization scaling parameter
+        # Initialize shared scaling factor beta (= alpha in MINT paper, Section IV-C)
+        # Formula: 2 * mean(|W|) / sqrt(2^(n-1) - 1):
+        # sets an initial quantization range proportional to the weight magnitude.
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
 
     def forward(self, x):
-        # Quantize weights if enabled
+        # Quantize weights
         if args.wq:
             if args.share:
                 qweight,beta = w_q(self.conv_module.weight, self.num_bits_w, self.beta[0])
@@ -215,24 +230,26 @@ class QConvBN2dLIF(nn.Module):
         else:
             qweight = self.conv_module.weight
             
-        # Apply quantized Conv2d
+        # Standard BN, not folded
         x = F.conv2d(x, qweight, self.conv_module.bias, stride=self.conv_module.stride,
                                         padding=self.conv_module.padding,
                                         dilation=self.conv_module.dilation,
                                         groups=self.conv_module.groups)
-        # Apply BatchNorm
         x = self.bn_module(x)
         
-        # Pass through LIF neuron
+        # Pass shared scaling factor beta to LIF neuron
         if args.share:
             s = self.lif_module(x, args.share, beta, bias=0)
         else:
             s = self.lif_module(x, args.share, 0, bias=0)
+        #return spikes from LIF neuron
         return s
 
-
-# Quantized Conv-BN block for SNNs (no LIF)
-# Integrates quantized Conv2d and BatchNorm2d, used for shortcut connections
+"""
+QConvBN2d — Quantized Conv + BN only (no LIF)
+Used for shortcut/residual connections in ResNet-style architectures,
+where the branch just needs to match dimensions — no spike generation needed.
+"""
 class QConvBN2d(nn.Module):
     def __init__(self, conv_module, bn_module, num_bits_w=4,num_bits_u=4,short_cut=False):
         super(QConvBN2d,self).__init__()
@@ -244,7 +261,9 @@ class QConvBN2d(nn.Module):
         self.num_bits_u = num_bits_u
         self.short_cut = short_cut
         
-        # Initialize quantization scaling parameter
+        # Initialize shared scaling factor beta (= alpha in MINT paper, Section IV-C)
+        # Formula: 2 * mean(|W|) / sqrt(2^(n-1) - 1):
+        # sets an initial quantization range proportional to the weight magnitude.
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
 
@@ -258,7 +277,7 @@ class QConvBN2d(nn.Module):
         else:
             qweight = self.conv_module.weight
             
-        # Apply quantized Conv2d
+        # Conv → BN, output is a feature map (not spikes)
         x = F.conv2d(x, qweight, self.conv_module.bias, stride=self.conv_module.stride,
                                         padding=self.conv_module.padding,
                                         dilation=self.conv_module.dilation,

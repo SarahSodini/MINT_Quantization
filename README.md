@@ -23,6 +23,42 @@ If you find MINT is useful for your research, please use the following bibtex to
   organization={IEEE}
 }
 ```
+## Files overview
+### args_config
+Argument configuration file for models and training
+sets default:
+- batch size = 256
+- learning rate=1e-3
+- epoch = 200
+- 4 dataloader workers
+- res19 default model architecture out of [vgg9,vgg16,res19]
+- dvs default dataset out of [cifar10,svhn,tiny,dvs]
+- adam default optimizer out of [adam, sgd]
+- leak_mem: (τ) default 0.5
+- th: firing threshold default 0.5
+- rst: reset type, default hard out of [hard,soft]
+- T: nr of timesteps per sample, default 10
+
+quantization arguments: 
+- uq: flag for enabling uniform quantization
+- bq: flag bias quantization
+- wq: flag weight quantization
+- share: flag shared scaling factor
+- sft_rst: flag soft reset
+- conv_b: flag bias in conv block
+- bn_a: flag for affine parameters in BatchNorm2d
+
+### cifar_dvs_dataset
+Prepares dvs data for training
+
+### network utils
+Defines the network building blocks architectures and initializes them according to args flags. Implements different combinations of quantized convolution, batch normalization (folded and not folded) and LIF across 4 classes: 
+-  QConv2dLIF — Conv + LIF only(simplest)
+- QConvBN2dLIF — Conv + BN (separate, not folded) + LIF
+- QFConvBN2dLIF — Conv + BN (folded into conv) + LIF (most optimized)
+- QConvBN2d — Conv + BN, no LIF (for residual shortcuts)
+
+
 
 ## Overview of implementation
 

@@ -18,15 +18,15 @@ def get_args():
     parser.add_argument('--th',default=0.5, type=float)
     parser.add_argument('--rst',default="hard", type=str)
     parser.add_argument('--T', type=int, default=10)
-    parser.add_argument('-uq', action='store_true')
-    parser.add_argument('-bq', action='store_true')
-    parser.add_argument('-wq', action='store_true')
-    parser.add_argument('-share', action='store_true')
-    parser.add_argument('-sft_rst', action='store_true')
-    parser.add_argument('-conv_b', action='store_true')
-    parser.add_argument('-bn_a', action='store_true')
-    parser.add_argument('-xa', action='store_true')
-    parser.add_argument('-ts', action='store_true')
+    parser.add_argument('-uq', action='store_true') #flag uniform quantization
+    parser.add_argument('-bq', action='store_true') #flag bias quantization
+    parser.add_argument('-wq', action='store_true') #flag weight quantization
+    parser.add_argument('-share', action='store_true') #flag shared scaling factor
+    parser.add_argument('-sft_rst', action='store_true') #flag soft reset
+    parser.add_argument('-conv_b', action='store_true') #flag bias conv block
+    parser.add_argument('-bn_a', action='store_true') #flag affine parameters in BatchNorm2d
+    parser.add_argument('-xa', action='store_true') #unclear+not used
+    parser.add_argument('-ts', action='store_true') #unclear+not used
 
     parser.add_argument('--epoch', type=int, default=200)
     # parser.add_argument("--seed", default=0, type=int, help="Random seed")
