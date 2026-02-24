@@ -180,14 +180,6 @@ class ResNet(nn.Module):
 
         return u_out
 
-
-def ResNet19(num_classes, total_timestep):
-def ResNet34():
-def ResNet50():
-def ResNet101():
-def ResNet152():
-def test():
-
 # Factory function for ResNet18 SNN
 def resnet18():
     return ResNet(BasicBlock, [2,2,2,2])

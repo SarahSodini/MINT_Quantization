@@ -19,9 +19,6 @@ cudnn.deterministic = True
 
 args = args_config.get_args()
 
-
-
-
 # Quantized Conv-BN-LIF block (see MINT paper, Section 3)
 # This module folds BatchNorm into Conv2d for inference, then applies quantization and LIF neuron
 class QFConvBN2dLIF(nn.Module):
@@ -195,12 +192,15 @@ class QConv2dLIF(nn.Module):
 class QConvBN2dLIF(nn.Module):
     def __init__(self, conv_module, bn_module, lif_module, num_bits_w=4,num_bits_b=4, num_bits_u=4):
         super(QConvBN2dLIF,self).__init__()
+
         self.conv_module = conv_module
         self.lif_module = lif_module
         self.bn_module  = bn_module
+
         self.num_bits_w = num_bits_w
         self.num_bits_b = num_bits_b
         self.num_bits_u = num_bits_u
+        
         # Initialize quantization scaling parameter
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
@@ -214,6 +214,7 @@ class QConvBN2dLIF(nn.Module):
                 qweight = b_q(self.conv_module.weight, self.num_bits_w)
         else:
             qweight = self.conv_module.weight
+            
         # Apply quantized Conv2d
         x = F.conv2d(x, qweight, self.conv_module.bias, stride=self.conv_module.stride,
                                         padding=self.conv_module.padding,
@@ -221,6 +222,7 @@ class QConvBN2dLIF(nn.Module):
                                         groups=self.conv_module.groups)
         # Apply BatchNorm
         x = self.bn_module(x)
+        
         # Pass through LIF neuron
         if args.share:
             s = self.lif_module(x, args.share, beta, bias=0)
@@ -229,17 +231,19 @@ class QConvBN2dLIF(nn.Module):
         return s
 
 
-
 # Quantized Conv-BN block for SNNs (no LIF)
 # Integrates quantized Conv2d and BatchNorm2d, used for shortcut connections
 class QConvBN2d(nn.Module):
     def __init__(self, conv_module, bn_module, num_bits_w=4,num_bits_u=4,short_cut=False):
         super(QConvBN2d,self).__init__()
+
         self.conv_module = conv_module
         self.bn_module  = bn_module
+
         self.num_bits_w = num_bits_w
         self.num_bits_u = num_bits_u
         self.short_cut = short_cut
+        
         # Initialize quantization scaling parameter
         initial_beta = torch.Tensor(conv_module.weight.abs().mean() * 2 / math.sqrt((2**(self.num_bits_w-1)-1)))
         self.beta = nn.ParameterList([nn.Parameter(initial_beta) for i in range(1)]).cuda()
@@ -253,6 +257,7 @@ class QConvBN2d(nn.Module):
                 qweight = b_q(self.conv_module.weight, self.num_bits_w)
         else:
             qweight = self.conv_module.weight
+            
         # Apply quantized Conv2d
         x = F.conv2d(x, qweight, self.conv_module.bias, stride=self.conv_module.stride,
                                         padding=self.conv_module.padding,
@@ -260,4 +265,5 @@ class QConvBN2d(nn.Module):
                                         groups=self.conv_module.groups)
         # Apply BatchNorm
         x = self.bn_module(x)
+
         return x
