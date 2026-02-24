@@ -5,56 +5,70 @@ import numpy as np
 import os
 
 
-# Surrogate gradient function for spiking neurons (see Eq. 7 in the MINT paper)
-# Implements a custom autograd function for the firing event with a surrogate gradient in backward
+"""
+Class for alternative surrogate gradient (not used in main code)
+uses a rectangular window centered at 0.5 (the threshold) instead of triangular surrogate gradient.
+"""
 class Firing(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp):
-        # Forward: binary spike if input > 0
-        out = ((inp)>0).float()
+        out = ((inp)>0).float() # fire if input>0
         ctx.save_for_backward(inp)
 
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
-        # Backward: surrogate gradient for non-differentiable spike
         input, = ctx.saved_tensors
         grad_input = grad_output.clone()
-        # The surrogate gradient is nonzero in a window around threshold (here, 0.5)
+        # Rectangular surrogate: gradient = 1 within ±1 of threshold (0.5), 0 elsewhere
         grad = grad_input*torch.where(torch.abs(input-0.5)<1, 1, 0)
         return grad, None, None
 
 
 
-# Implements the LIF neuron firing condition (see Eq. 2 in the MINT paper)
-# H: membrane potential, th: threshold, beta: scaling factor
+"""
+integer-only firing condition for MINT inference (threshold comparison in Eq. 9)
+Fires a spike if H >= ceil(vth / beta), where ceil(vth/beta) = θ (integer threshold). 
+Not used during training (LIFSpike handles that); intended for deployment.
+"""
 def lif_forward(H, th, beta):
     out = torch.zeros_like(H).cuda()
     out[H >= torch.ceil(th/beta)] = 1
     return out
 
 
-# Quantization functions for weights, membrane potential, and bias
-# These implement the quantization formulas (see Eq. 3 and 4 in the MINT paper)
-# w_q: quantize weights with shared scaling alpha
+"""
+Quantization functions w_q, u_q, b_q (eq. 10)
+All three follow the same pattern:
+  1. tanh: smoothly bounds values to (-1, 1) 
+  2. clamp(w/alpha): normalize to [-1, 1] using the scaling factor
+  3. scale to integer levels: multiply by (2^(b-1) - 1)
+  4. STE round: round to nearest integer in forward, straight-through in backward
+  5. scale back to original range
+"""
 def w_q(w, b, alpha):
+    #Quantize weights using shared scaling factor alpha
+    #Returns quantized weights AND alpha for shared scaling
     w = torch.tanh(w)  # restrict to [-1, 1]
     w = torch.clamp(w/alpha,min=-1,max=1)
     w = w*(2**(b-1)-1)  # scale to quantization levels
     w_hat = (w.round()-w).detach()+w  # STE: straight-through estimator
     return w_hat*alpha/(2**(b-1)-1), alpha
 
-# u_q: quantize membrane potential with shared scaling alpha
 def u_q(u, b, alpha):
+    # quantize membrane potential with shared scaling alpha
+    #Returns quantized membrane potential AND alpha for shared scaling
     u = torch.tanh(u)
     u = torch.clamp(u/alpha,min=-1,max=1)
     u = u*(2**(b-1)-1)
     u_hat = (u.round()-u).detach()+u
     return u_hat*alpha/(2**(b-1)-1)
 
-# b_q: quantize with per-tensor scaling (not shared)
 def b_q(w, b):
+    # Quantize with independent per-tensor scale (not shared).
+    # Used when args.share=False => each layer quantizes with its own alpha,
+    # derived from the max absolute value of the tensor.
     w = torch.tanh(w)
     alpha = w.data.abs().max()
     w = torch.clamp(w/alpha,min=-1,max=1)
@@ -63,7 +77,7 @@ def b_q(w, b):
     return w_hat*alpha/(2**(b-1)-1)
 
 
-# Inference-time quantization (no STE)
+"""Inference-time quantization (no STE)"""
 def w_q_inference(w, b, alpha):
     w = torch.tanh(w)
     w = torch.clamp(w/alpha,min=-1,max=1)
@@ -79,7 +93,9 @@ def b_q_inference(w, b):
     w_hat = w.round()
     return w_hat, alpha/(2**(b-1)-1)
 
-
+"""
+Miscellaneous helpers
+"""
 def checkdir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -94,8 +110,13 @@ def adjust_learning_rate(optimizer, cur_epoch, max_epoch):
         for param_group in optimizer.param_groups:
             param_group["lr"] /= 10
 
+"""
+Evaluation functions
+All test functions sum the per-timestep outputs before computing accuracy:
+averages the network's "vote" across all timesteps (rate coding).
+"""
 def test(model, test_loader, criterion):
-    
+    # Standard top-1 accuracy evaluation
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model.eval()
@@ -116,6 +137,7 @@ def test(model, test_loader, criterion):
     return accuracy
 
 def top_k_accuracy(outputs, targets, k=5):
+    # Compute top-k accuracy for a single batch
     _, top_pred = outputs.topk(k, 1, True, True)
     top_pred = top_pred.t()
     correct = top_pred.eq(targets.view(1, -1).expand_as(top_pred))
@@ -123,6 +145,7 @@ def top_k_accuracy(outputs, targets, k=5):
     return top_k_acc.item()
 
 def test_5(model, test_loader, criterion):
+    # Top-5 accuracy evaluation — used for TinyImageNet (200 classes)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model.eval()
@@ -144,12 +167,20 @@ def test_5(model, test_loader, criterion):
     return top5_accuracy
 
 
+"""
+accumulates spike count and neuron count for spike rate computation.
+Divides by 8 to normalize per-timestep (assumes T=8).
+"""
 def computing_firerate(module, inp, out):
-
     fired_spikes = torch.count_nonzero(out)
     module.spikerate += fired_spikes/8.0
     module.num_neuron += np.prod(out.shape[1:len(out.shape)])/8.0
 
+"""
+Evaluates top-1 accuracy AND average spike rate across all QConv2dLIF layers.
+Spike rate measures how sparse the network's activations are: lower is more
+energy-efficient on neuromorphic hardware (fewer synaptic operations)
+"""
 def test_spa(model, test_loader, criterion):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
@@ -157,11 +188,10 @@ def test_spa(model, test_loader, criterion):
     correct = 0
     total = 0
 
-    #TODO
-    overall_nueron =0
+    overall_nueron = 0
     overall_spike = 0
 
-    ### Defining Sparsity Handling Code
+    # Register hooks on all LIF modules inside QConv2dLIF layers
     neuron_type = 'QConv2dLIF'
     for name, module in model.named_modules():
         if neuron_type in str(type(module)):
@@ -180,6 +210,7 @@ def test_spa(model, test_loader, criterion):
 
         accuracy = 100. * correct / len(test_loader.dataset)
 
+    # Aggregate spike counts across all monitored layers
     for name, module in model.named_modules():
         if neuron_type in str(type(module)):
             overall_nueron += module.lif_module.num_neuron/len(test_loader)
@@ -192,12 +223,10 @@ def test_spa(model, test_loader, criterion):
 
     return accuracy,overall_spike/overall_nueron
 
-
-
-
-
-# Plot the distribution of membrane potentials (u) for a given layer and timestep
-# Used for analyzing quantization effects and neuron dynamics
+"""
+Plot histogram of membrane potential values for layer l at timestep t.
+Used to visualize quantization effects on the potential distribution.
+"""
 def get_u_distribution(data,l,t,color):
     bins = 128
     i_max = 10
@@ -232,11 +261,10 @@ def get_u_distribution(data,l,t,color):
 
 
 
-# Utility class for tracking running averages (e.g., loss, accuracy)
+"""
+Utility class for tracking running averages (e.g., loss, accuracy)
+"""
 class AverageMeter(object):
-    """
-    Computes and stores the average and current value
-    """
     def __init__(self):
         self.reset()
 

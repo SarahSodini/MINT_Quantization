@@ -129,12 +129,10 @@ class LIFSpike(nn.Module):
         grad = ((1.0 - torch.abs(H-self.thresh)).clamp(min=0))
         s = (((H-self.thresh) > 0).float() - H*grad).detach() + H*grad.detach()
 
-        # Quantized membrane potential update (Eq. 6)
         if self.soft_reset:
             U = (H - s*self.thresh)*self.leak
         else:
             U = H*self.leak*(1-s)
-        # Optional quantization of membrane potential (Eq. 4)
         if self.quant_u:
             if share:
                 self.membrane_potential = u_q(U,self.num_bits_u,beta)
