@@ -53,10 +53,21 @@ Prepares dvs data for training
 
 ### network utils
 Defines the network building blocks architectures and initializes them according to args flags. Implements different combinations of quantized convolution, batch normalization (folded and not folded) and LIF across 4 classes: 
--  QConv2dLIF — Conv + LIF only(simplest)
+- QConv2dLIF — Conv + LIF only(simplest)
 - QConvBN2dLIF — Conv + BN (separate, not folded) + LIF
 - QFConvBN2dLIF — Conv + BN (folded into conv) + LIF (most optimized)
 - QConvBN2d — Conv + BN, no LIF (for residual shortcuts)
+
+### quant_net
+Defines 3 VGG-style SNN model classes (Q_ShareScale_VGG9, Q_ShareScale_VGG16, Q_ShareScale_Fold_VGG16) that stack MINT-quantized Conc-BN-LIF blocks from network utils into full network architectures. Handles both static image datasets and DVS event-based input
+
+### quant_resnet
+Defines the MINT-quantized ResNet architecture (BasicBlock and ResNet) with residual connections, where each block applies a quantized Conv-BN-LIF path and adds it back to a quantized shortcut branch before a second LIF fires. Also provides factory functions for standard variants (ResNet18/19/34) and the same direct-encoding/DVS dual-path input handling as the VGG models.
+
+
+
+
+
 
 
 

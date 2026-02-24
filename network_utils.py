@@ -21,8 +21,8 @@ args = args_config.get_args()
 
 
 """
-Fuses 3 operations: a convolution, batch normalization and a LIF spiking neuron into a single block with
-MINT quantization 
+QFConvBN2dLIF — Conv + BN (folded into conv) + LIF
+most optimized network block for inference
 """
 class QFConvBN2dLIF(nn.Module):
     def __init__(self, conv_module, bn_module, lif_module, num_bits_w=4, num_bits_bias=4, num_bits_u=4):

@@ -15,32 +15,45 @@ from network_utils import *
 from spike_related import LIFSpike
 
 args = args_config.get_args()
-# firing = Firing.apply
 
-# Quantized VGG9 SNN model (see MINT paper, Section 4)
-# This model stacks quantized convolutional layers and LIF neurons
+"""
+Q_ShareScale_VGG9
+VGG9-style SNN with MINT quantization (no BatchNorm — simpler/smaller model).
+Uses QConv2dLIF blocks (Conv + LIF, no BN folding).
+"""
 class Q_ShareScale_VGG9(nn.Module):
     def __init__(self,time_step,dataset):
         super(Q_ShareScale_VGG9, self).__init__()
-        # Set bitwidth for quantization (see Table 1 in paper)
+
+        # Bit-widths for weight and membrane potential quantization (MINT W2U2)
         self.num_bits_w = 2
         self.num_bits_u = 2
         print("quant bw for w: " + str(self.num_bits_w))
         print("quant bw for u: " + str(self.num_bits_u))
-        # SNN parameters
+
         self.time_step = time_step
         input_dim = 3
-        # First layer: regular Conv2d + LIF (no quantization on input)
+
+        # ── Layer 1: NOT quantized ────────────────────────────────────────────
+        # Quantizing here would lose too much information, so it stays full precision
+        # => quant_u=False
         self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=3, padding=1, bias=False)
         self.direct_lif = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=False)
-        # Quantized Conv2d + LIF layers (see Section 3)
+        
+        # ── Layers 2–7: Quantized Conv + LIF (MINT blocks) ───────────────────
+        # Each QConv2dLIF has sepaate learnable beta (shared scaling factor alpha
+        # in the MINT paper). Beta is shared between the conv weights and the
+        # LIF membrane potential to avoid multipliers at inference.
         conv2 = nn.Conv2d(64,64, kernel_size=3, padding=1, bias=False)
         lif2 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
-        self.ConvLif2 = QConv2dLIF(conv2,lif2,self.num_bits_w,self.num_bits_u)
-        self.pool1 = nn.MaxPool2d(kernel_size=2)
+        self.ConvLif2 = QConv2dLIF(conv2, lif2, self.num_bits_w, self.num_bits_u)
+        
+        self.pool1 = nn.MaxPool2d(kernel_size=2) #reduces height and width dimension with factor 2
+        
         conv3 = nn.Conv2d(64,128, kernel_size=3, padding=1, bias=False)
         lif3 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif3 = QConv2dLIF(conv3,lif3,self.num_bits_w,self.num_bits_u)
+        
         conv4 = nn.Conv2d(128,128, kernel_size=3, padding=1, bias=False)
         lif4 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif4 = QConv2dLIF(conv4,lif4,self.num_bits_w,self.num_bits_u)
@@ -59,8 +72,10 @@ class Q_ShareScale_VGG9(nn.Module):
         lif7 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvLif7 = QConv2dLIF(conv7,lif7,self.num_bits_w,self.num_bits_u)
 
-        self.pool3 = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool3 = nn.AdaptiveAvgPool2d((1, 1)) #collapses spatial dims to 1x1 regardless of input size => the model is resolution-agnostic
 
+        
+        # Output classifier: 10 classes for CIFAR-10, 200 for TinyImageNet
         if dataset == 'tiny':
             size = 1
             clas = 200
@@ -71,6 +86,9 @@ class Q_ShareScale_VGG9(nn.Module):
 
         self.weight_init()
 
+    """  
+    resets membrane potential of LIF neuron
+    """
     def reset_dynamics(self):
         for m in self.modules():
             if isinstance(m,QConv2dLIF):
@@ -78,6 +96,9 @@ class Q_ShareScale_VGG9(nn.Module):
         self.direct_lif.reset_mem()
         return 0
 
+    """
+    Kaiming initialization of weights
+    """
     def weight_init(self):
         for m in self.modules():
             if isinstance(m,QConvBN2dLIF):
@@ -87,15 +108,17 @@ class Q_ShareScale_VGG9(nn.Module):
 
 
 
+    # Forward pass for SNN with time steps
     def forward(self, inp):
-        # Forward pass for SNN with time steps (see Section 4)
         u_out = []
-        self.reset_dynamics()
+        self.reset_dynamics() #Clear mem pot before processing new input
+
         static_input = self.conv1(inp)
         for t in range(self.time_step):
-            # First LIF layer (no quantization)
+            # get spike from first layer
             s = self.direct_lif.direct_forward(static_input,False,0)
-            # Quantized Conv2d + LIF layers
+            
+            # spike flows through network
             s = self.ConvLif2(s)
             s = self.pool1(s)
             s = self.ConvLif3(s)
@@ -105,31 +128,33 @@ class Q_ShareScale_VGG9(nn.Module):
             s = self.ConvLif6(s)
             s = self.ConvLif7(s)
             s = self.pool3(s)
+
+            #flatten and classify output
             s = s.view(s.shape[0],-1)
             s = self.fc_out(s)
+            #collect output from each timestep, averaged at loss computation
             u_out += [s]
-        return u_out
+        return u_out # list of length time_step, each element shape (batch, num_classes)
 
 
-
-
-
-# Quantized VGG16 SNN model (see MINT paper, Section 4)
-# This model stacks quantized Conv-BN-LIF blocks and LIF neurons for deeper architectures
+"""
+Q_ShareScale_VGG16
+VGG16-style SNN with MINT quantization and BatchNorm (NOT folded).
+Uses QConvBN2dLIF blocks (Conv + BN + LIF).
+"""
 class Q_ShareScale_VGG16(nn.Module):
     def __init__(self,time_step,dataset):
         super(Q_ShareScale_VGG16, self).__init__()
-        # Set bitwidth for quantization (see Table 1 in paper)
+
+        # Set bitwidth for quantization of weights, bias and membrane potential
         self.num_bits_w = 4
         self.num_bits_b = 4
         self.num_bits_u = 4
-  
-        #### Print out the parameters for quantization
-        
+          
         print("quant bw for w: " + str(self.num_bits_w))
         print("quant bw for b: " + str(self.num_bits_b))
         print("quant bw for u: " + str(self.num_bits_u))
-        # SNN parameters
+        
         self.time_step = time_step
         
         # Input dimension depends on dataset
@@ -138,17 +163,20 @@ class Q_ShareScale_VGG16(nn.Module):
         else:
             input_dim = 3
             
-        # First layer: Conv2d + BN + LIF (no quantization on input)
+        # ── Layer 1: NOT quantized (static image path) ────────────────────────
+        # Used for non-DVS datasets only
         self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64,affine=True)
         self.direct_lif = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=False)
         
-        # Quantized Conv-BN-LIF blocks (see Section 3)
+        # ── ConvBnLif1: only used for DVS input ──────────────────────────────
         conv1dvs = nn.Conv2d(input_dim, 64, kernel_size=3, padding=1, bias=False)
         bn1dvs = nn.BatchNorm2d(64,affine=True)
         lif1dvs =  LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
         self.ConvBnLif1 = QConvBN2dLIF(conv1dvs,bn1dvs,lif1dvs,self.num_bits_w,self.num_bits_b,self.num_bits_u)
 
+        # ── Layers 2–13: Quantized Conv + BN + LIF ───────────────────────────
+        # No BN folding
         conv2 = nn.Conv2d(64,64, kernel_size=3, padding=1, bias=args.conv_b)
         bn2 = nn.BatchNorm2d(64,affine=args.bn_a)
         lif2 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
@@ -220,19 +248,20 @@ class Q_ShareScale_VGG16(nn.Module):
         self.pool5 = nn.AvgPool2d(kernel_size=2)
 
         if dataset == 'tiny':
+            # TinyImageNet: 64x64 input, after 5 poolings → 2x2
             size = 2
             clas = 200
         else:
+             # CIFAR-10/DVS: 32x32 input, after poolings → 1x1
             size = 1
             clas = 10
         self.fc_out = nn.Linear(512*(size**2), clas, bias=True)
 
         self.dataset = dataset
-
         self.weight_init()
 
     def reset_dynamics(self):
-        # Reset all LIF neuron states
+        # Reset all LIF membrane potentials
         for m in self.modules():
             if isinstance(m,QConvBN2dLIF):
                 m.lif_module.reset_mem()
@@ -249,9 +278,11 @@ class Q_ShareScale_VGG16(nn.Module):
 
 
     def forward(self, inp):
-        # Forward pass for SNN with time steps (see Section 4)
+        # Forward pass for SNN with time steps
         u_out = []
         self.reset_dynamics()
+
+        # Static datasets: run conv+BN once, reuse across all timesteps (direct encoding)
         if self.dataset != 'dvs':
             static_input = self.bn1(self.conv1(inp))
 
@@ -262,6 +293,7 @@ class Q_ShareScale_VGG16(nn.Module):
             else:
                 s = self.direct_lif.direct_forward(static_input,False,0)
 
+            #pass spike through network
             s = self.ConvBnLif2(s)
             s = self.pool1(s)
 
@@ -296,38 +328,39 @@ class Q_ShareScale_VGG16(nn.Module):
 
 
 
-
-
-
-# Quantized VGG16 SNN model with folded BatchNorm (for inference efficiency)
-# This model is similar to Q_ShareScale_VGG16 but assumes BatchNorm is folded into Conv weights
+"""
+Q_ShareScale_Fold_VGG16
+VGG-style architecture with MINT quantization and folded BatchNorm 
+OBS: uses QConvBN2dLIF though so something is not right since it's the same architecture as not folded VGG
+"""
 class Q_ShareScale_Fold_VGG16(nn.Module):
     def __init__(self,time_step,dataset):
         super(Q_ShareScale_Fold_VGG16, self).__init__()
-        # Set bitwidth for quantization (see Table 1 in paper)
+
+        # 8-bit quantization
         self.num_bits_w = 8
         self.num_bits_b = 8
         self.num_bits_u = 8
   
-        #### Print out the parameters for quantization
         print("quant bw for w: " + str(self.num_bits_w))
         print("quant bw for b: " + str(self.num_bits_b))
         print("quant bw for u: " + str(self.num_bits_u))
-        # SNN parameters
+ 
         self.time_step = time_step
 
-        input_dim = 3
+        input_dim = 3 #no DVS support
         
-        # First layer: Conv2d + BN + LIF (no quantization on input)
+        # ── Layer 1: NOT quantized (direct encoding) ─────
         self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64,affine=True)
         self.direct_lif = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=False)
         
-        # Quantized Conv-BN-LIF blocks (see Section 3)
+        # ── Layers 2–13: QConvBN2dLIF blocks (BN NOT folded here either) ──────
+        # should probably use QFConvBN2dLIF instead
         conv2 = nn.Conv2d(64,64, kernel_size=3, padding=1, bias=args.conv_b)
         bn2 = nn.BatchNorm2d(64,affine=args.bn_a)
         lif2 = LIFSpike(thresh=args.th, leak=args.leak_mem, gamma=1.0, soft_reset=args.sft_rst, quant_u=args.uq, num_bits_u=self.num_bits_u)
-        self.ConvBnLif2 = QConvBN2dLIF(conv2,bn2,lif2,self.num_bits_w,self.num_bits_b,self.num_bits_u)
+        self.ConvBnLif2 = QConvBN2dLIF(conv2, bn2, lif2, self.num_bits_w, self.num_bits_b, self.num_bits_u)
 
         self.pool1 = nn.MaxPool2d(kernel_size=2)
 
@@ -395,9 +428,11 @@ class Q_ShareScale_Fold_VGG16(nn.Module):
         self.pool5 = nn.AvgPool2d(kernel_size=2)
 
         if dataset == 'tiny':
+            # TinyImageNet: 64x64 input, after 5 poolings → 2x2
             size = 2
-            clas = 200
+            clas = 200 
         else:
+            # CIFAR-10/DVS: 32x32 input, after poolings → 1x1
             size = 1
             clas = 10
         self.fc_out = nn.Linear(512*(size**2), clas, bias=True)
@@ -405,7 +440,7 @@ class Q_ShareScale_Fold_VGG16(nn.Module):
         self.weight_init()
 
     def reset_dynamics(self):
-        # Reset all LIF neuron states
+        # Reset LIF membrane potentials
         for m in self.modules():
             if isinstance(m,QConvBN2dLIF):
                 m.lif_module.reset_mem()
@@ -413,7 +448,7 @@ class Q_ShareScale_Fold_VGG16(nn.Module):
         return 0
 
     def weight_init(self):
-        # Initialize weights for Conv and Linear layers
+        # Initialize weights 
         for m in self.modules():
             if isinstance(m,QConvBN2dLIF):
                 nn.init.kaiming_uniform_(m.conv_module.weight)
@@ -421,11 +456,12 @@ class Q_ShareScale_Fold_VGG16(nn.Module):
                 nn.init.kaiming_uniform_(m.weight)
 
     def forward(self, inp):
-        # Forward pass for SNN with time steps (see Section 4)
+        # Forward pass for SNN with time steps 
         u_out = []
         self.reset_dynamics()
         static_input = self.bn1(self.conv1(inp))
 
+        #pass spike through network
         for t in range(self.time_step):
             s = self.direct_lif(static_input,False,0)
             s = self.ConvBnLif2(s)
