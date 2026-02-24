@@ -59,16 +59,16 @@ Defines the network building blocks architectures and initializes them according
 - QConvBN2d — Conv + BN, no LIF (for residual shortcuts)
 
 ### quant_net
-Defines 3 VGG-style SNN model classes (Q_ShareScale_VGG9, Q_ShareScale_VGG16, Q_ShareScale_Fold_VGG16) that stack MINT-quantized Conc-BN-LIF blocks from network utils into full network architectures. Handles both static image datasets and DVS event-based input
+Defines 3 VGG-style SNN model classes (Q_ShareScale_VGG9, Q_ShareScale_VGG16, Q_ShareScale_Fold_VGG16) that stack MINT-quantized Conv-BN-LIF blocks from network utils into full network architectures. Handles both static image datasets and DVS event-based input
 
 ### quant_resnet
-Defines the MINT-quantized ResNet architecture (BasicBlock and ResNet) with residual connections, where each block applies a quantized Conv-BN-LIF path and adds it back to a quantized shortcut branch before a second LIF fires. Also provides factory functions for standard variants (ResNet18/19/34) and the same direct-encoding/DVS dual-path input handling as the VGG models.
+Defines the MINT-quantized ResNet architecture (BasicBlock and ResNet) with residual connections, where each block applies a quantized Conv-BN-LIF from network utils into full network architectures. Handles both static image datasets and DVS event-based input
 
+### spike_related
+implements core LIF spiking neuron with an inline surrogate gradient for backpropagation, soft/hard reset modes and optional MINT quantization of the membrane potential. The neuron maintains persistent state across timesteps and must be reset between input samples
 
-
-
-
-
+### train_snn
+Main training script: builds the dataset, model, and optimizer from command-line arguments, then runs the train/test loop, saving the best checkpoint.
 
 
 ## Overview of implementation

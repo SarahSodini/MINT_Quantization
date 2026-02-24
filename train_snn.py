@@ -15,6 +15,10 @@ import tracemalloc
 import math
 import gc
 
+"""
+Main training script: builds the dataset, model, and optimizer from command-line arguments, 
+then runs the train/test loop, saving the best checkpoint.
+"""
 def main():
 
     torch.manual_seed(23)
@@ -26,8 +30,11 @@ def main():
     print("********** SNN simulation parameters **********")
     print(args)
 
-#Builds dataloader for specified datasets
+    # ── Dataset ───────────────────────────────────────────────────────────────
+    #Build train/test loaders for specified datasets
     if args.dataset == 'cifar10':
+        # CIFAR-10: 32x32 images, 10 classes
+        # augmentation: random crop + horizontal flip
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -71,7 +78,8 @@ def main():
         num_classes = 10
 
     elif args.dataset == 'svhn':
-        
+    # SVHN: 32x32 street house number images, 10 classes
+    # Augmentation: random crop + horizontal flip
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -111,6 +119,8 @@ def main():
         num_classes = 10
     
     elif args.dataset == 'tiny':
+        # TinyImageNet: 64x64 images, 200 classes
+        # Augmentation: random rotation + horizontal flip.
         traindir = os.path.join('/gpfs/gibbs/project/panda/shared/tiny-imagenet-200/train')
         valdir = os.path.join('/gpfs/gibbs/project/panda/shared/tiny-imagenet-200/val')
             # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -134,6 +144,8 @@ def main():
 
         num_classes = 200
     elif args.dataset == 'dvs':
+        # DVS (CIFAR10-DVS): event-based 2-channel frames, 10 classes, 
+        # no augmentation, pre-processed into tensors
         train_dataset_dvs=torch.load("./train_dataset_dvs_8.pt",pickle_module=dill)
         test_dataset_dvs=torch.load("./test_dataset_dvs_8.pt",pickle_module=dill)
 
@@ -166,7 +178,7 @@ def main():
         # print(f"Common indices between train and test datasets: {common_indices}")
         # exit()
         
-# Builds model and optimizer based on specified parameters
+    # ── Model ─────────────────────────────────────────────────────────────────
     criterion = nn.CrossEntropyLoss()
     if args.arch == 'vgg16':
         model = Q_ShareScale_VGG16(args.T,args.dataset).cuda()
@@ -174,12 +186,9 @@ def main():
         model = Q_ShareScale_VGG9(args.T,args.dataset).cuda()
     elif args.arch == 'res19':
         model = ResNet19(num_classes, args.T).cuda()
-        # model = VGG19_Direct_TS_UQ(args.T, args.leak_mem, args.th, args.rst, args.uq, args.xq, args.wq, args.xa).cuda()
-    # else:
-    #     model = VGG9_Direct_Uniform_UQ_List(args.T, args.leak_mem, args.th, args.rst).cuda()
-
     # print(model)
-
+    
+    # ── Optimizer and scheduler ───────────────────────────────────────────────
     if args.optim == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), args.lr, 0.9, weight_decay=5e-4)
     elif args.optim == 'adam':
@@ -187,10 +196,12 @@ def main():
     else:
         print ("Current does not support other optimizers other than sgd or adam.")
         exit()
+    
+    # Cosine annealing: smoothly decays lr from args.lr to 0 over all epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max= args.epoch, eta_min= 0)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=args.epoch)
 
-#Training loop
+    #── Training loop ─────────────────────────────────────────────────────────
     best_accuracy = 0
     # tracemalloc.start()
     for epoch_ in range(args.epoch):
@@ -206,12 +217,10 @@ def main():
         scheduler.step()
         # time2 = time.time()
         # print("Training time for one epoch: ", time2-time1)
+        
+        # Save checkpoint whenever a new best accuracy is achieved
         if accuracy > best_accuracy:
             best_accuracy = accuracy
-            # checkdir(f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/w{model.num_bits_w}/u{model.num_bits_u}/share/T4")
-            # torch.save(model, f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/w{model.num_bits_w}/u{model.num_bits_u}/share/T4/final_dict.pth.tar")
-            # checkdir(f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/w4u4")
-            # torch.save(model, f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/w4u4/final_dict.pth.tar")
             checkdir(f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/T10/baseline")
             torch.save(model, f"{os.getcwd()}/model_dumps/{args.arch}/{args.dataset}/{args.rst}/T10/baseline/final_dict.pth.tar")
             
@@ -227,7 +236,9 @@ def main():
         #     if("muless-int-snn" in line):
         #         print(line)
 
-    
+"""
+Training loop
+"""
 def train(args, train_data, model, criterion, optimizer, epoch):
     model.train()
 
@@ -236,11 +247,18 @@ def train(args, train_data, model, criterion, optimizer, epoch):
         optimizer.zero_grad()
         imgs, targets = imgs.cuda(), targets.cuda()
 
+        # Forward pass: model returns a list of outputs, one per timestep
         output = model(imgs)
 
+        # Average the cross-entropy loss across all timesteps.
         train_loss = sum([criterion(s, targets) for s in output]) / args.T
         
         train_loss.backward()
+        
+        # ── MINT gradient scaling for beta ────────────────────────────────────
+        # scale beta's gradient with 1/sqrt(Nw * s(n))
+        # Nw: nr of weights in layer
+        # s(n): 2^(n-1)-1
         if args.share:
             for m in model.modules():
                 if isinstance(m,QConvBN2dLIF):
