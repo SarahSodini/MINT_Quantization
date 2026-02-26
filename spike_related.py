@@ -59,55 +59,34 @@ class LIFSpike(nn.Module):
     bias: bias term
     """
     def forward(self, s, share, beta, bias):
-        # ── Step 1: compute residual membrane potential (left hand side Eq. 9) ─────────────────────────────────────────────────
+        # ── Residual membrane potential (Eq. 6) ─────────────────────────────────────────────────
         # conv output s=W*S is added to the membrane potential from last timestep (τ*U(t-1)).
-        # W*S was already computed by the conv layer, τ*U(t-1) was stored at the end of the last timestep.
+        # W*S was already computed by the conv layer, membrane_potential=τ*U(t-1) was stored at the end of the last timestep.
         H = s + self.membrane_potential
         
-        # ── Step 2: Fire (right hand side check eq.9) ────────────────────────────
+        # ── Fire (Eq.9) ────────────────────────────
         # spike = 1 if H > thresh, else 0
         # grad: triangular surrogate gradient centered at thresh to resolve zero grad problem
-        #
-        # grad peaks at 1 when H==thresh, falls to 0 at ±1.
-        # This equation solves zero grad problem by making FORWARD pass return the true binary spike while
-        # the BACKWARD pass only sees the smooth surrogate gradient
-        #
-        #   s = (true_spike - H*grad).detach() + H*grad
-        #
-        # Forward:  .detach() transforms expression into a constant, so H*grad cancels → returns true_spike:
-        #             s = (true_spike - H*grad) + H*grad = true_spike 
-        #
-        # Backward: PyTorch only differentiates through non-detached terms => (true_spike - H*grad) with zero grad falls away =>
-        #             ds/dH = d(H*grad)/dH = grad 
-        grad = ((1.0 - torch.abs(H-self.thresh)).clamp(min=0))  
+        grad = ((1.0 - torch.abs(H-self.thresh)).clamp(min=0)) # triangular surrogare gradient
+        ############s = (((H-self.thresh) > 0).float() - H*grad).detach() + H*grad -- the other line might be a bug!!!##############
         s = (((H-self.thresh) > 0).float() - H*grad).detach() + H*grad.detach()
 
-
-        # Quantized membrane potential update (Eq. 6)
-        # ── Step 3: Reset  ─────────────────────────────────────────────────────
-        # After firing, reduce the membrane potential to prevent immediate re-firing.
-        #
-        # Soft reset (default): subtract threshold from H when spike fires.
-        #   U = (H - s*thresh) * leak
-        #   If s=1: U = (H - thresh) * leak  => keeps the "overflow" above threshold
-        #   If s=0: U = H * leak             => just decays
-        # Gentler and retains information above the threshold.
-        #
-        # Hard reset: force U to 0 when spike fires.
-        #   U = H * leak * (1 - s)
-        #   If s=1: U = 0                    => full reset regardless of H
-        #   If s=0: U = H * leak             => just decays
+        # ── Reset membrane potential ─────────────────────────────────────────────────────
         if self.soft_reset:
+            # Soft reset (default):
+            #   s=1 -> U = (H - thresh) * leak: keeps within threshold
+            #   s=0 -> U = H * leak: decays
             U = (H - s*self.thresh)*self.leak
         else:
+            # Hard reset: force U to 0 when spike fires.
+            #   s=1 -> U = 0     
+            #   s=0 -> U = H * leak: decay
             U = H*self.leak*(1-s)
         
-        # ── Step 4: Quantize membrane potential (Eq. 10) ────────────────────────
+        # ── Quantize membrane potential (Eq. 10) ────────────────────────
         # If quant_u=True, quantize U before storing it as the next timestep's state.
-        # u_q: tanh-bounded quantization using the shared scaling factor beta 
+        # u_q: quantization using the shared scaling factor beta 
         # b_q: Quantization without shared scaling factor beta
-        # 
-        # OBS: tanh implemented instead of clamp: smoother bounded variant
         if self.quant_u:
             if share:
                 self.membrane_potential = u_q(U,self.num_bits_u,beta)
